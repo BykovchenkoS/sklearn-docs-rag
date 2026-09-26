@@ -1,0 +1,11 @@
+services:
+  api:
+    build: .
+    image: sklearn-docs-rag:latest
+    container_name: sklearn-docs-rag
+    ports:
+      - "8000:8000"
+    environment:
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      DEBUG: ${DEBUG:-false}
+    restart: unless-stopped
