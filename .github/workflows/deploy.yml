@@ -1,0 +1,56 @@
+name: Deploy
+
+on:
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
+    branches: [main]
+
+permissions:
+  contents: read
+  packages: read
+
+jobs:
+  deploy:
+    if: github.event.workflow_run.conclusion == 'success'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Prepare image name
+        run: |
+          OWNER_LOWER=$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')
+          echo "IMAGE=ghcr.io/$OWNER_LOWER/sklearn-docs-rag" >> $GITHUB_ENV
+      - name: Deploy to server
+        uses: appleboy/ssh-action@v1
+        with:
+          host: ${{ secrets.VPS_HOST }}
+          username: root
+          key: ${{ secrets.SSH_PRIVATE_KEY }}
+          script: |
+            mkdir -p /opt/mentoring/sklearn-docs-rag
+            cd /opt/mentoring/sklearn-docs-rag
+
+            cat > .env << 'EOF'
+            LLM_API_KEY=${{ secrets.LLM_API_KEY }}
+            ROOT_PATH=/sonya/rags
+            EOF
+
+            echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u ${{ github.actor }} --password-stdin
+            docker pull ${{ env.IMAGE }}:latest
+
+            docker rm -f sklearn-docs-rag 2>/dev/null || true
+            docker run -d \
+              --name sklearn-docs-rag \
+              --restart unless-stopped \
+              -p 127.0.0.1:9000:8000 \
+              --env-file .env \
+              ${{ env.IMAGE }}:latest
+
+            sleep 5
+            if [ -n "$(docker ps -q -f name=sklearn-docs-rag -f status=running)" ]; then
+              docker image prune -f
+            else
+              echo "Контейнер не поднялся"
+              docker logs --tail 50 sklearn-docs-rag
+              exit 1
+            fi
+            docker logout ghcr.io
