@@ -9,3 +9,4 @@ __pycache__/
 .idea/
 .vscode/
 qdrant_data/
+data/corpus_chunks.jsonl
