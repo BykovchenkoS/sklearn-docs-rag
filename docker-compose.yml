@@ -1,11 +1,39 @@
+networks:
+  # Своя сеть: не пересекаемся с папиной mentoring-net и её контейнерами.
+  sonya-rag-net:
+    name: sonya-rag-net
+    external: false
+
 services:
-  api:
+  app:
     build: .
     image: sklearn-docs-rag:latest
-    container_name: sklearn-docs-rag
+    container_name: sonya-rag            # наше имя (у папы — rag-app)
     ports:
-      - "8000:8000"
+      # Локально: http://localhost:8000
+      # На сервере APP_PORT=9000, т.к. 8000 занят папиным rag-app.
+      - "127.0.0.1:${APP_PORT:-8000}:8000"
+    env_file:
+      - .env
     environment:
-      LOG_LEVEL: ${LOG_LEVEL:-INFO}
-      DEBUG: ${DEBUG:-false}
+      # Внутри сети приложение всегда ходит на ВНУТРЕННИЙ порт Qdrant 6333.
+      - QDRANT_URL=http://qdrant:6333
+    networks:
+      - sonya-rag-net
+    depends_on:
+      - qdrant
+    restart: unless-stopped
+
+  qdrant:
+    image: qdrant/qdrant:v1.12.0
+    container_name: sonya-qdrant         # наше имя (у папы контейнер зовётся qdrant)
+    ports:
+      # Локально: http://localhost:6333/dashboard — как в курсе.
+      # На сервере QDRANT_PORT=6334, т.к. 6333 занят папиным Qdrant.
+      # Внутри контейнера Qdrant всегда слушает 6333.
+      - "127.0.0.1:${QDRANT_PORT:-6333}:6333"
+    volumes:
+      - ./qdrant_data:/qdrant/storage
+    networks:
+      - sonya-rag-net
     restart: unless-stopped
