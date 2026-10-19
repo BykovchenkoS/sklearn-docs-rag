@@ -7,7 +7,7 @@ networks:
 services:
   app:
     build: .
-    image: sklearn-docs-rag:latest
+    image: ghcr.io/bykovchenkos/sklearn-docs-rag:latest
     container_name: sonya-rag            # наше имя (у папы — rag-app)
     ports:
       # Локально: http://localhost:8000

@@ -5,6 +5,9 @@ __pycache__
 *.pyc
 .pytest_cache
 tests
+notebooks
+qdrant_data
+data/corpus_chunks.jsonl
 .env
 .env.*
 README.md

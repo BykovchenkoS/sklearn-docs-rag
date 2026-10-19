@@ -15,42 +15,68 @@ jobs:
     if: github.event.workflow_run.conclusion == 'success'
     runs-on: ubuntu-latest
     steps:
-      - name: Prepare image name
-        run: |
-          OWNER_LOWER=$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')
-          echo "IMAGE=ghcr.io/$OWNER_LOWER/sklearn-docs-rag" >> $GITHUB_ENV
+      - uses: actions/checkout@v4
+
+      - name: Copy compose file to VPS
+        uses: appleboy/scp-action@v0.1.7
+        with:
+          host: ${{ secrets.VPS_HOST }}
+          username: root
+          key: ${{ secrets.SSH_PRIVATE_KEY }}
+          source: docker-compose.yml
+          target: /opt/mentoring/sklearn-docs-rag
+
       - name: Deploy to server
         uses: appleboy/ssh-action@v1
         with:
           host: ${{ secrets.VPS_HOST }}
           username: root
           key: ${{ secrets.SSH_PRIVATE_KEY }}
+          command_timeout: 30m
           script: |
+            # --- swap 2 ГБ (идемпотентно, Шаг 7) ---
+            if ! swapon --show | grep -q '/swapfile'; then
+              fallocate -l 2G /swapfile 2>/dev/null || dd if=/dev/zero of=/swapfile bs=1M count=2048
+              chmod 600 /swapfile
+              mkswap /swapfile
+              swapon /swapfile
+              grep -q '/swapfile' /etc/fstab || echo "/swapfile none swap sw 0 0" >> /etc/fstab
+            fi
+
             mkdir -p /opt/mentoring/sklearn-docs-rag
             cd /opt/mentoring/sklearn-docs-rag
 
             cat > .env << 'EOF'
             LLM_API_KEY=${{ secrets.LLM_API_KEY }}
+            QDRANT_URL=http://qdrant:6333
             ROOT_PATH=/sonya/rags
+            APP_PORT=9000
+            QDRANT_PORT=6334
             EOF
 
             echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u ${{ github.actor }} --password-stdin
-            docker pull ${{ env.IMAGE }}:latest
+            docker compose pull app
 
+            # Старый базовый контейнер не должен занимать 9000.
             docker rm -f sklearn-docs-rag 2>/dev/null || true
-            docker run -d \
-              --name sklearn-docs-rag \
-              --restart unless-stopped \
-              -p 127.0.0.1:9000:8000 \
-              --env-file .env \
-              ${{ env.IMAGE }}:latest
 
+            docker compose up -d qdrant
+
+            # Первый запуск: если коллекции нет — нарезаем и индексируем корпус.
+            if docker compose run --rm --no-deps app python -c "import sys; from qdrant_client import QdrantClient; from app.config import settings; sys.exit(0 if QdrantClient(url=settings.qdrant_url).collection_exists(settings.collection_name) else 1)"; then
+              echo "Collection exists, skip indexing"
+            else
+              echo "Indexing corpus..."
+              docker compose run --rm --no-deps app sh -c "python -m app.scripts.load_corpus && python -m app.scripts.index_corpus"
+            fi
+
+            docker compose up -d app
             sleep 5
-            if [ -n "$(docker ps -q -f name=sklearn-docs-rag -f status=running)" ]; then
+            if [ -n "$(docker ps -q -f name=sonya-rag -f status=running)" ]; then
               docker image prune -f
             else
-              echo "Контейнер не поднялся"
-              docker logs --tail 50 sklearn-docs-rag
+              echo "Container failed to start"
+              docker logs --tail 50 sonya-rag
               exit 1
             fi
             docker logout ghcr.io

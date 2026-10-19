@@ -1,10 +1,11 @@
+from unittest.mock import MagicMock, patch
+
 import pytest
-from fastapi.testclient import TestClient
-
-from app.main import app
 
 
-@pytest.fixture
-def client():
-    with TestClient(app) as c:
-        yield c
+@pytest.fixture(autouse=True)
+def _mock_rag_chain():
+    """Тесты не поднимают реальные Qdrant и LLM: lifespan получает мок-цепочку."""
+    with patch("app.main.build_rag_chain") as build:
+        build.return_value = (MagicMock(), MagicMock())
+        yield build
