@@ -1,58 +1,133 @@
 # scikit-learn docs RAG assistant
 
-AI-ассистент по официальной документации scikit-learn: задаёте вопрос —
-получаете ответ с цитатами из документации. Работает на русском и английском,
-печатает ответ потоком и честно говорит «не знаю», если ответа нет в корпусе.
+[![CI](https://github.com/BykovchenkoS/sklearn-docs-rag/actions/workflows/ci.yml/badge.svg)](https://github.com/BykovchenkoS/sklearn-docs-rag/actions/workflows/ci.yml)
+[![Deploy](https://github.com/BykovchenkoS/sklearn-docs-rag/actions/workflows/deploy.yml/badge.svg)](https://github.com/BykovchenkoS/sklearn-docs-rag/actions/workflows/deploy.yml)
+![Python](https://img.shields.io/badge/python-3.11-blue)
+![FastAPI](https://img.shields.io/badge/FastAPI-0.141-009688)
+![Qdrant](https://img.shields.io/badge/Qdrant-1.12-DC244C)
 
-**Живой сервис:** https://89-110-100-156.nip.io/sonya/rags/
+AI-ассистент по официальной документации scikit-learn. Задаёте вопрос на
+естественном языке, получаете ответ с цитатами из документации.
+
+**Сервис:** <https://89-110-100-156.nip.io/sonya/rags/>
+
+## Возможности
+
+- Ответы **с цитатами** `[1]`, `[2]` и панелью источников (URL документа)
+- **Русский и английский**: мультиязычный эмбеддер `multilingual-e5-small`, ответ на языке вопроса
+- **Стриминг**: ответ печатается по токенам, в UI видны TTFT и тайминги
+- **«Не знаю»** для вопросов вне корпуса, без выдуманных фактов
+- **LaTeX-формулы** (Ridge, Lasso, метрики) рендерятся в чате
+- **REST API** `POST /chat` + **Gradio-чат** на главной странице
+- **Оценка качества** через RAGAS на golden dataset
+- **CI/CD**: тесты на PR, сборка образа в GHCR, автодеплой на VPS
 
 ## Архитектура
 
 ```mermaid
 flowchart LR
-    USER[Пользователь] --> NGINX[Nginx HTTPS /sonya/rags]
-    NGINX --> APP[FastAPI + Gradio streaming]
-    APP --> EMB[multilingual-e5-small embedder]
-    APP --> Q[(Qdrant)]
-    APP --> LLM[OpenRouter -> llama-3.3-70b-instruct]
+    U[Пользователь] --> N[Nginx HTTPS<br/>/sonya/rags]
+    N --> A[FastAPI + Gradio<br/>streaming]
+    A --> E[multilingual-e5-small]
+    A --> Q[(Qdrant)]
+    A --> L[OpenRouter<br/>llama-3.3-70b-instruct]
+    S[load_corpus.py] --> C[corpus_chunks.jsonl]
+    C --> I[index_corpus.py]
+    I --> Q
 ```
 
-## Метрики
+Индексация отделена от обработки запросов: скрипт один раз нарезает корпус и пишет векторы в Qdrant, а приложение 
+при старте загружает эмбеддер и ищет по готовой коллекции.
 
-Замеры на golden dataset (10 вопросов), 3 модуля scikit-learn + about.md →
-265 чанков, `meta-llama/llama-3.3-70b-instruct`, `notebooks/rag_eval.ipynb`:
+**Путь запроса:** вопрос -> эмбеддинг -> top-4 чанка из Qdrant -> промпт «контекст + вопрос» -> LLM -> ответ с цитатами.
 
-| Метрика | Значение | Что измеряет |
-|---|---|---|
-| Recall@4 | **1.00** | retriever возвращает релевантный URL во всех 10 случаях |
-| Faithfulness | **0.854** | LLM-судья: ответ не противоречит контексту |
-| Answer Relevancy | **0.862** | LLM-судья: ответ по делу, не уходит в сторону |
+## Стек
 
-## Локальный запуск
+| Слой | Технология |
+|---|---|
+| API и UI | FastAPI, Gradio 5 |
+| RAG | LangChain LCEL |
+| Векторная БД | Qdrant 1.12 |
+| Эмбеддинги | `intfloat/multilingual-e5-small` (384, cosine) |
+| LLM | OpenRouter, `meta-llama/llama-3.3-70b-instruct` |
+| Оценка | RAGAS 0.2.15 |
+| Инфраструктура | Docker, GitHub Actions, GHCR, nginx, Let's Encrypt |
+
+## Быстрый старт
 
 ```bash
 conda create -y -n sklearn-docs-rag python=3.11
 conda activate sklearn-docs-rag
 pip install -r requirements.txt
+```
 
+Создать `.env` по образцу `.env.example` и указать ключ OpenRouter:
+
+```bash
+LLM_API_KEY=sk-or-v1-...
+```
+
+Поднять Qdrant, собрать корпус и проиндексировать его:
+
+```bash
 docker compose up -d qdrant
 python -m app.scripts.load_corpus
 python -m app.scripts.index_corpus
+```
+
+Запустить сервис:
+
+```bash
 uvicorn app.main:app --reload
 ```
 
-Откройте http://localhost:8000. REST-эндпоинт: `POST /chat` с телом
-`{"question": "..."}`.
+- Чат: <http://localhost:8000>
+- Swagger: <http://localhost:8000/docs>
 
-## Деплой
+## REST API
 
-Push в `main` → CI (тесты + сборка образа в GHCR) → Deploy (SSH на VPS,
-`docker compose`, автоиндексация при первом запуске) → живой сервис на
-https://89-110-100-156.nip.io/sonya/rags/
+```bash
+curl -X POST http://localhost:8000/chat \
+  -H "Content-Type: application/json" \
+  -d '{"question": "What is ElasticNet?"}'
+```
 
-## Для резюме
+```powershell
+$body = @{ question = "What is ElasticNet?" } | ConvertTo-Json
+Invoke-RestMethod -Uri "http://localhost:8000/chat" `
+  -Method Post -ContentType "application/json" -Body $body
+```
 
-> RAG-сервис над документацией scikit-learn на FastAPI + LangChain LCEL +
-> Qdrant + multilingual-e5-small. Streaming-чат в Gradio, оценка качества
-> через RAGAS на golden dataset (Recall@4 1.00, Faithfulness 0.854,
-> Answer Relevancy 0.862).
+Ответ:
+
+```json
+{
+  "answer": "... [1] ...",
+  "sources": [
+    {"url": "https://scikit-learn.org/stable/modules/linear_model.html", "snippet": "...", "full_context": "..."}
+  ]
+}
+```
+
+## Корпус
+
+Три раздела официальной документации scikit-learn + внутренний `about.md`:
+
+- `linear_model.html` - линейные модели, Ridge, Lasso, ElasticNet
+- `tree.html` - деревья решений, переобучение, гиперпараметры
+- `model_evaluation.html` - метрики качества
+- `data/local/about.md` - описание сервиса и его возможностей
+
+Нарезка: 1000 символов с перекрытием 200, **265 чанков**. 
+Переиндексация - повторный запуск `load_corpus` + `index_corpus` (коллекция пересоздаётся).
+
+## Оценка качества
+
+Golden dataset: 10 вопросов (7 EN по трём модулям, 2 RU на мультиязычность, 1 мета-вопрос про `about.md`). 
+Ноутбук: `notebooks/rag_eval.ipynb`, результат: `notebooks/rag_metrics.json`.
+
+| Метрика | Значение | Что измеряет |
+|---|---|---|
+| Recall@4 | **1.00** | retriever вернул релевантный раздел во всех 10 случаях |
+| Faithfulness | **0.854** | ответ не противоречит найденному контексту |
+| Answer Relevancy | **0.862** | ответ по делу, не уходит в сторону |
