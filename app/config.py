@@ -13,7 +13,8 @@ class Settings(BaseSettings):
 
     # LLM provider. Дефолты для OpenRouter; override через .env при смене провайдера.
     llm_base_url: str = "https://openrouter.ai/api/v1"
-    llm_model: str = "meta-llama/llama-3.3-70b-instruct"
+    # gpt-4o-mini стабильно выполняет structured tool-calling (multi-hop).
+    llm_model: str = "openai/gpt-4o-mini"
     llm_temperature: float = 0.0
 
     # Vector store
@@ -25,6 +26,12 @@ class Settings(BaseSettings):
     embedding_model: str = "intfloat/multilingual-e5-small"
     embedding_dim: int = 384
     normalize_embeddings: bool = True
+
+    # Agent
+    max_iterations: int = 5
+    agent_temperature: float = 0.0
+    enable_web_search: bool = True
+    agent_max_output_chars: int = 2000
 
 
 settings = Settings()
