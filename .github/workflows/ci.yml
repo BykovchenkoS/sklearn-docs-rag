@@ -24,6 +24,8 @@ jobs:
         run: pytest -v
         env:
           LLM_API_KEY: ci-dummy-key
+          QDRANT_URL: http://localhost:6333
+          ENABLE_WEB_SEARCH: "false"
 
   build-and-push:
     runs-on: ubuntu-latest
