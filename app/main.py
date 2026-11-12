@@ -5,6 +5,7 @@ import uuid
 from contextlib import asynccontextmanager
 
 import gradio as gr
+import structlog
 from fastapi import FastAPI, HTTPException
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from langgraph.checkpoint.memory import MemorySaver
@@ -15,6 +16,14 @@ from app.agent.guardrails import GuardrailError, check_input, check_output
 from app.rag.chain import build_rag_chain
 from app.schemas.agent import AgentRequest, AgentResponse, Source as AgentSource, TraceStep
 from app.schemas.chat import ChatRequest, ChatResponse, Source
+
+structlog.configure(
+    processors=[
+        structlog.processors.add_log_level,
+        structlog.processors.TimeStamper(fmt="iso"),
+        structlog.processors.JSONRenderer(),
+    ],
+)
 
 _chain = None
 _retriever = None

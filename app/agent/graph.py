@@ -1,5 +1,7 @@
+import time
 from typing import Annotated, TypedDict
 
+import structlog
 from langchain_core.messages import AnyMessage, SystemMessage
 from langgraph.checkpoint.memory import MemorySaver
 from langgraph.graph import StateGraph, END
@@ -10,6 +12,8 @@ from app.agent.prompts import SYSTEM_PROMPT
 from app.agent.tools import TOOLS
 from app.config import settings
 from app.llm import get_llm
+
+log = structlog.get_logger()
 
 
 class AgentState(TypedDict):
@@ -28,8 +32,18 @@ def _get_llm_with_tools():
 
 
 def agent_node(state: AgentState) -> dict:
+    t0 = time.perf_counter()
     messages = [SystemMessage(content=SYSTEM_PROMPT)] + state["messages"]
     response = _get_llm_with_tools().invoke(messages)
+    latency_ms = int((time.perf_counter() - t0) * 1000)
+    tool_calls = getattr(response, "tool_calls", None) or []
+    log.info(
+        "agent_node_completed",
+        iteration=state["iteration_count"] + 1,
+        latency_ms=latency_ms,
+        tool_calls_count=len(tool_calls),
+        tools_requested=[tc["name"] for tc in tool_calls],
+    )
     return {
         "messages": [response],
         "iteration_count": state["iteration_count"] + 1,
