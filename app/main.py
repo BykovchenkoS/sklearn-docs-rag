@@ -8,6 +8,7 @@ import gradio as gr
 from fastapi import FastAPI, HTTPException
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from langgraph.checkpoint.memory import MemorySaver
+from starlette.middleware.base import BaseHTTPMiddleware
 
 from app.agent.graph import build_agent_graph
 from app.agent.guardrails import GuardrailError, check_input, check_output
@@ -52,6 +53,24 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="RAG service", lifespan=lifespan, root_path=ROOT_PATH)
+
+
+class DisableProxyBufferingMiddleware(BaseHTTPMiddleware):
+    """Tell nginx (X-Accel-Buffering) and others not to buffer responses on
+    Gradio's SSE-streaming endpoints. Без этого live-обновления статуса
+    приходят одним пакетом в конце."""
+
+    SSE_PATHS = ("/queue/data", "/queue/join")
+
+    async def dispatch(self, request, call_next):
+        response = await call_next(request)
+        if any(request.url.path.startswith(p) for p in self.SSE_PATHS):
+            response.headers["X-Accel-Buffering"] = "no"
+            response.headers["Cache-Control"] = "no-cache"
+        return response
+
+
+app.add_middleware(DisableProxyBufferingMiddleware)
 
 
 @app.get("/health")
@@ -235,6 +254,90 @@ def _format_sources(docs: list) -> str:
 INITIAL_STATUS = _status("💤 Готов к работе", kind="idle")
 EMPTY_TIMINGS = '<div class="panel-empty">Здесь появятся тайминги запроса.</div>'
 EMPTY_SOURCES = '<div class="panel-empty">Здесь появятся источники ответа.</div>'
+EMPTY_TRACE = '<div class="panel-empty">Включите режим «Агент», чтобы увидеть шаги.</div>'
+TRACE_FAST = '<div class="panel-empty">Режим «Быстрый» — trace не используется.</div>'
+
+
+def _format_agent_timings(total_ms: int, iterations: int, tool_calls_count: int) -> str:
+    cards = [
+        _timing_card("Total", f"{total_ms} ms", "total"),
+        _timing_card("Итераций", str(iterations), "retrieval"),
+        _timing_card("Tool-вызовов", str(tool_calls_count), "llm"),
+    ]
+    return '<div class="timing-badges">' + "".join(cards) + "</div>"
+
+
+def _format_trace(steps: list) -> str:
+    if not steps:
+        return EMPTY_TRACE
+    items = []
+    for s in steps:
+        tool = html_lib.escape(str(s.tool or "—"))
+        node = html_lib.escape(s.node)
+        args = html_lib.escape(str(s.input or {}))
+        output = html_lib.escape((s.output or "")[:160])
+        items.append(
+            '<div class="trace-step">'
+            '<div class="trace-head">'
+            f'<span class="trace-num">{s.step}</span>'
+            f'<span class="trace-node">{node}</span>'
+            f'<span class="trace-tool">{tool}</span>'
+            "</div>"
+            f'<div class="trace-args">{args}</div>'
+            f'<div class="trace-output">{output}…</div>'
+            "</div>"
+        )
+    return '<div class="trace-list">' + "".join(items) + "</div>"
+
+
+def _format_agent_sources(sources: list) -> str:
+    if not sources:
+        return '<div class="panel-empty">Источники появятся после вызова documentation_search.</div>'
+    cards = []
+    for i, src in enumerate(sources, 1):
+        url = src.url
+        module = _module_label(url)
+        if url.startswith("http"):
+            link = (
+                f'<a class="source-link" href="{html_lib.escape(url, quote=True)}" '
+                f'target="_blank" rel="noopener">открыть ↗</a>'
+            )
+        else:
+            link = f'<span class="source-link muted">{html_lib.escape(url)}</span>'
+        cards.append(
+            '<div class="source-card">'
+            '<div class="source-head">'
+            f'<span class="source-num">{i}</span>'
+            f'<span class="source-module">{html_lib.escape(module)}</span>'
+            f"{link}"
+            "</div>"
+            f'<div class="source-snippet">{html_lib.escape(src.snippet)}…</div>'
+            "</div>"
+        )
+    return '<div class="sources-list">' + "".join(cards) + "</div>"
+
+
+def _agent_sources_from_messages(messages: list) -> list:
+    sources: list[AgentSource] = []
+    for msg in messages:
+        if not isinstance(msg, ToolMessage):
+            continue
+        content = msg.content if isinstance(msg.content, str) else ""
+        if "Sources:" not in content:
+            continue
+        body, _, sources_block = content.partition("Sources:")
+        tool_text = body.strip()
+        for line in sources_block.strip().splitlines():
+            url = line.strip().lstrip("- ").strip()
+            if url:
+                sources.append(
+                    AgentSource(
+                        url=url,
+                        snippet=tool_text[:200],
+                        full_context=tool_text,
+                    )
+                )
+    return sources
 
 
 def respond(message: str, history: list):
@@ -316,8 +419,185 @@ def respond(message: str, history: list):
         )
 
 
+def respond_agent(message: str, history: list, thread_id_state: str):
+    """Streaming handler for agent mode.
+
+    Yields на каждом событии графа: смена статуса, токены LLM, финал.
+    Gradio дорисовывает UI на каждый yield.
+    """
+    if not message or not message.strip():
+        yield (
+            history,
+            "",
+            INITIAL_STATUS,
+            EMPTY_TIMINGS,
+            EMPTY_SOURCES,
+            EMPTY_TRACE,
+            thread_id_state,
+        )
+        return
+
+    try:
+        check_input(message)
+    except GuardrailError as e:
+        history = history + [
+            {"role": "user", "content": message},
+            {"role": "assistant", "content": f"⚠️ Запрос отклонён guardrails: {e}"},
+        ]
+        yield (
+            history,
+            "",
+            _status("🛡 Guardrail отклонил запрос", str(e), "error"),
+            EMPTY_TIMINGS,
+            EMPTY_SOURCES,
+            EMPTY_TRACE,
+            thread_id_state,
+        )
+        return
+
+    history = history + [
+        {"role": "user", "content": message},
+        {"role": "assistant", "content": ""},
+    ]
+    thread_id = thread_id_state or str(uuid.uuid4())
+    t0 = time.perf_counter()
+
+    trace_panel = EMPTY_TRACE
+    sources_panel = EMPTY_SOURCES
+    yield (
+        history,
+        "",
+        _status("🤔 LLM решает, какой инструмент вызвать…", "", "busy"),
+        _format_agent_timings(0, 0, 0),
+        sources_panel,
+        trace_panel,
+        thread_id,
+    )
+
+    accumulated = ""
+    final_messages: list = []
+    tool_calls_count = 0
+    iterations = 0
+    try:
+        for stream_mode, payload in _agent_graph.stream(
+            {"messages": [HumanMessage(content=message)], "iteration_count": 0},
+            config={"configurable": {"thread_id": thread_id}},
+            stream_mode=["updates", "messages"],
+        ):
+            elapsed = int((time.perf_counter() - t0) * 1000)
+            if stream_mode == "updates":
+                node, state_update = next(iter(payload.items()))
+                node_msgs = state_update.get("messages", []) or []
+                if node_msgs:
+                    final_messages = final_messages + node_msgs
+                if node == "agent":
+                    iterations += 1
+                    last = node_msgs[-1] if node_msgs else None
+                    tool_calls = getattr(last, "tool_calls", None) or []
+                    if tool_calls:
+                        name = tool_calls[0]["name"]
+                        tool_calls_count += 1
+                        status_text = {
+                            "documentation_search": "📚 Ищу в документации scikit-learn…",
+                            "python_repl": "🧮 Считаю в Python REPL…",
+                            "web_search": "🌐 Ищу в интернете…",
+                        }.get(name, f"🛠 Вызываю {name}…")
+                        yield (
+                            history,
+                            "",
+                            _status(status_text, f"итерация {iterations}", "busy"),
+                            _format_agent_timings(elapsed, iterations, tool_calls_count),
+                            sources_panel,
+                            trace_panel,
+                            thread_id,
+                        )
+                elif node == "tool_executor":
+                    tool_msg = node_msgs[-1] if node_msgs else None
+                    tool_name = getattr(tool_msg, "name", "tool")
+                    length = len(getattr(tool_msg, "content", "") or "")
+                    trace_steps, _ = _extract_trace(final_messages, sources=[])
+                    trace_panel = _format_trace(trace_steps)
+                    yield (
+                        history,
+                        "",
+                        _status(
+                            f"🔍 Анализирую результат {tool_name} ({length} симв.)…",
+                            "решаю, что делать дальше",
+                            "busy",
+                        ),
+                        _format_agent_timings(elapsed, iterations, tool_calls_count),
+                        sources_panel,
+                        trace_panel,
+                        thread_id,
+                    )
+            elif stream_mode == "messages":
+                msg_chunk, meta = payload
+                chunk_text = getattr(msg_chunk, "content", "") or ""
+                if (
+                    chunk_text
+                    and meta.get("langgraph_node") == "agent"
+                    and not getattr(msg_chunk, "tool_call_chunks", None)
+                ):
+                    accumulated += chunk_text
+                    history[-1]["content"] = accumulated
+                    yield (
+                        history,
+                        "",
+                        _status("✍ LLM пишет ответ потоком…", f"{len(accumulated)} симв.", "busy"),
+                        _format_agent_timings(elapsed, iterations, tool_calls_count),
+                        sources_panel,
+                        trace_panel,
+                        thread_id,
+                    )
+
+        total_ms = int((time.perf_counter() - t0) * 1000)
+        trace_steps, tools_used = _extract_trace(final_messages, sources=[])
+        safe_answer, _ = check_output(accumulated, tools_used)
+        history[-1]["content"] = safe_answer
+        agent_sources = _agent_sources_from_messages(final_messages)
+        sources_panel = _format_agent_sources(agent_sources)
+        trace_panel = _format_trace(trace_steps)
+        final_status = _status(
+            "✅ Готово",
+            f"{total_ms / 1000:.1f} с · {tool_calls_count} tool-вызовов · {iterations} итераций",
+            "done",
+        )
+        yield (
+            history,
+            "",
+            final_status,
+            _format_agent_timings(total_ms, iterations, tool_calls_count),
+            sources_panel,
+            trace_panel,
+            thread_id,
+        )
+    except Exception as exc:
+        history[-1]["content"] = (
+            f"⚠️ Агент недоступен ({type(exc).__name__}). Попробуй позже."
+        )
+        yield (
+            history,
+            "",
+            _status("⚠️ Ошибка агента", type(exc).__name__, "error"),
+            _format_agent_timings(
+                int((time.perf_counter() - t0) * 1000), iterations, tool_calls_count
+            ),
+            sources_panel,
+            trace_panel,
+            thread_id,
+        )
+
+
+def _route_respond(message, history, mode, thread_id_state):
+    if mode == "Агент (/agent)":
+        yield from respond_agent(message, history, thread_id_state)
+    else:
+        for out in respond(message, history):
+            yield (*out, TRACE_FAST, thread_id_state)
+
+
 def clear_all():
-    return [], "", INITIAL_STATUS, EMPTY_TIMINGS, EMPTY_SOURCES
+    return [], "", INITIAL_STATUS, EMPTY_TIMINGS, EMPTY_SOURCES, EMPTY_TRACE, ""
 
 
 HEADER_HTML = f"""
@@ -579,6 +859,41 @@ CSS = """
   opacity: .55;
 }
 
+/* --- trace агента --- */
+.trace-list { display: flex; flex-direction: column; gap: .5rem; }
+.trace-step {
+  padding: .55rem .7rem;
+  border-radius: 12px;
+  background: var(--background-fill-secondary);
+  border: 1px solid var(--border-color-primary);
+  font-size: .8rem;
+}
+.trace-head {
+  display: flex;
+  align-items: center;
+  gap: .45rem;
+  margin-bottom: .25rem;
+}
+.trace-num {
+  width: 20px; height: 20px;
+  display: grid; place-items: center;
+  border-radius: 50%;
+  background: var(--brand);
+  color: #fff;
+  font-size: .68rem;
+  font-weight: 700;
+  flex: none;
+}
+.trace-node { font-weight: 600; opacity: .7; }
+.trace-tool { font-weight: 700; color: var(--brand); }
+.trace-args {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: .72rem;
+  opacity: .75;
+  word-break: break-all;
+}
+.trace-output { margin-top: .25rem; opacity: .8; }
+
 /* --- мобильная версия --- */
 @media (max-width: 768px) {
   .app-header { flex-direction: column; align-items: flex-start; }
@@ -635,19 +950,36 @@ with gr.Blocks(title="scikit-learn docs RAG", theme=THEME, css=CSS, fill_height=
                             )
 
                 with gr.Column(scale=1, min_width=280, elem_id="side-panel"):
+                    mode_radio = gr.Radio(
+                        choices=["Быстрый (/chat)", "Агент (/agent)"],
+                        value="Быстрый (/chat)",
+                        label="Режим",
+                    )
                     gr.Markdown("### ⏱ Тайминги")
                     timings_html = gr.HTML(EMPTY_TIMINGS)
                     gr.Markdown("### 📚 Источники")
                     sources_html = gr.HTML(EMPTY_SOURCES)
+                    with gr.Accordion("Что сделал агент", open=False):
+                        trace_html = gr.HTML(EMPTY_TRACE)
 
         with gr.Tab("ℹ️ О сервисе"):
             gr.Markdown(ABOUT_MD)
 
     gr.Markdown(FOOTER_MD)
 
-    _outputs = [chatbot, msg, status_html, timings_html, sources_html]
-    msg.submit(respond, [msg, chatbot], _outputs)
-    send.click(respond, [msg, chatbot], _outputs)
+    thread_id_state = gr.State("")
+    _inputs = [msg, chatbot, mode_radio, thread_id_state]
+    _outputs = [
+        chatbot,
+        msg,
+        status_html,
+        timings_html,
+        sources_html,
+        trace_html,
+        thread_id_state,
+    ]
+    msg.submit(_route_respond, _inputs, _outputs)
+    send.click(_route_respond, _inputs, _outputs)
     clear.click(clear_all, None, _outputs)
 
 
