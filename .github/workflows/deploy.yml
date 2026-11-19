@@ -34,7 +34,7 @@ jobs:
           key: ${{ secrets.SSH_PRIVATE_KEY }}
           command_timeout: 30m
           script: |
-            # --- swap 2 ГБ (идемпотентно, Шаг 7) ---
+            # Создаём swap, если он ещё не настроен.
             if ! swapon --show | grep -q '/swapfile'; then
               fallocate -l 2G /swapfile 2>/dev/null || dd if=/dev/zero of=/swapfile bs=1M count=2048
               chmod 600 /swapfile
@@ -57,7 +57,7 @@ jobs:
             echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u ${{ github.actor }} --password-stdin
             docker compose pull app
 
-            # Старый базовый контейнер не должен занимать 9000.
+            # Удаляем контейнер прежнего деплоя, если он остался.
             docker rm -f sklearn-docs-rag 2>/dev/null || true
 
             docker compose up -d qdrant

@@ -8,7 +8,6 @@ class Settings(BaseSettings):
         extra="ignore",
     )
 
-    # Только секрет — без default, контейнер падает если не задан.
     llm_api_key: str
 
     # LLM provider. Дефолты для OpenRouter; override через .env при смене провайдера.
@@ -17,7 +16,6 @@ class Settings(BaseSettings):
     llm_model: str = "openai/gpt-4o-mini"
     llm_temperature: float = 0.0
 
-    # Vector store
     qdrant_url: str = "http://qdrant:6333"
     collection_name: str = "sklearn_docs"
     top_k: int = 4
@@ -27,7 +25,6 @@ class Settings(BaseSettings):
     embedding_dim: int = 384
     normalize_embeddings: bool = True
 
-    # Agent
     max_iterations: int = 5
     agent_temperature: float = 0.0
     enable_web_search: bool = True

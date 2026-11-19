@@ -35,15 +35,14 @@ def documentation_search(query: str) -> str:
     return f"{answer}\n\nSources:\n{sources_block}"
 
 
-# SECURITY NOTE: PythonREPLTool executes arbitrary code in the same process
-# as our app. It is NEVER exposed directly to end users — only the agent
-# decides what to send into it. For production with untrusted users, wrap
-# in a sandbox (gvisor, firecracker, e2b.dev).
+# SECURITY: PythonREPLTool executes code in the application process.
+# Agent-generated code is influenced by user input; isolate execution in
+# a sandbox before allowing untrusted requests.
 @tool
 def python_repl(code: str) -> str:
     """Execute Python code and return the printed output.
     Use this tool for arithmetic, computing formulas, or transforming data.
-    The code runs in a sandboxed REPL; use `print()` to surface results.
+    Code runs in the application process; use `print()` to surface results.
     Args:
         code: Python source code to execute.
     Returns:

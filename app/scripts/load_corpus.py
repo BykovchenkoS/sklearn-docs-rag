@@ -13,7 +13,6 @@ from langchain_community.document_loaders import RecursiveUrlLoader
 from langchain_core.documents import Document
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 
-# Три самых «спрашиваемых» раздела Classic ML.
 SEED_URLS = [
     "https://scikit-learn.org/stable/modules/linear_model.html",
     "https://scikit-learn.org/stable/modules/tree.html",

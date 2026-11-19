@@ -58,7 +58,6 @@ def main() -> None:
     vectorstore.add_documents(chunks)
     print(f"Indexed {len(chunks)} chunks")
 
-    # Sanity: один запрос на английском, один на русском, один meta-вопрос.
     for query in [
         "How does Ridge regression work?",
         "Что такое переобучение?",
