@@ -263,8 +263,9 @@ def _format_sources(docs: list) -> str:
 INITIAL_STATUS = _status("💤 Готов к работе", kind="idle")
 EMPTY_TIMINGS = '<div class="panel-empty">Здесь появятся тайминги запроса.</div>'
 EMPTY_SOURCES = '<div class="panel-empty">Здесь появятся источники ответа.</div>'
-EMPTY_TRACE = '<div class="panel-empty">Включите режим «Агент», чтобы увидеть шаги.</div>'
+EMPTY_TRACE = '<div class="panel-empty">Шаги агента появятся здесь.</div>'
 TRACE_FAST = '<div class="panel-empty">Режим «Быстрый» — trace не используется.</div>'
+TRACE_NO_TOOLS = '<div class="panel-empty">Агент ответил без вызова инструментов.</div>'
 
 
 def _format_agent_timings(total_ms: int, iterations: int, tool_calls_count: int) -> str:
@@ -565,7 +566,7 @@ def respond_agent(message: str, history: list, thread_id_state: str):
         history[-1]["content"] = safe_answer
         agent_sources = _agent_sources_from_messages(final_messages)
         sources_panel = _format_agent_sources(agent_sources)
-        trace_panel = _format_trace(trace_steps)
+        trace_panel = _format_trace(trace_steps) if trace_steps else TRACE_NO_TOOLS
         final_status = _status(
             "✅ Готово",
             f"{total_ms / 1000:.1f} с · {tool_calls_count} tool-вызовов · {iterations} итераций",
